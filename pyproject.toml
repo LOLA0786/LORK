@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,20 +11,21 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 
 keywords = [
-  "ai",
-  "agents",
-  "orchestration",
-  "infrastructure",
-  "llm"
+  "ai", "agents", "orchestration", "infrastructure", "llm",
+  "control-plane", "policy", "governance", "agentic",
 ]
 
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+  "Typing :: Typed",
 ]
 
 dependencies = [
@@ -33,22 +34,33 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+examples = [
+  "openai>=1.10.0",
+  "anthropic>=0.18.0",
+]
+
 dev = [
   "pytest>=7.4.0",
   "pytest-asyncio>=0.23.0",
   "pytest-cov>=4.1.0",
-  "ruff>=0.1.0",
-  "mypy>=1.7.0",
+  "ruff>=0.2.0",
+  "mypy>=1.8.0",
+  "hatch>=1.9.0",
+  "build>=1.0.0",
+  "twine>=4.0.0",
 ]
 
 api = [
-  "fastapi>=0.104.0",
-  "uvicorn[standard]>=0.24.0",
+  "fastapi>=0.109.0",
+  "uvicorn[standard]>=0.27.0",
+  "httpx>=0.26.0",
 ]
 
 postgres = [
   "asyncpg>=0.29.0",
   "sqlalchemy[asyncio]>=2.0.0",
+  "alembic>=1.13.0",
 ]
 
 redis = [
@@ -56,41 +68,78 @@ redis = [
 ]
 
 observability = [
-  "opentelemetry-api>=1.21.0",
-  "opentelemetry-sdk>=1.21.0",
-  "prometheus-client>=0.19.0",
+  "opentelemetry-api>=1.23.0",
+  "opentelemetry-sdk>=1.23.0",
+  "opentelemetry-exporter-otlp>=1.23.0",
+  "prometheus-client>=0.20.0",
+]
+
+all = [
+  "lork[examples,api,postgres,redis,observability]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/LOLA0786/LORK"
-Documentation = "https://docs.lork.ai"
-Repository = "https://github.com/LOLA0786/LORK"
-Issues = "https://github.com/LOLA0786/LORK/issues"
+Homepage      = "https://github.com/LOLA0786/LORK"
+Documentation = "https://github.com/LOLA0786/LORK/tree/main/docs"
+Repository    = "https://github.com/LOLA0786/LORK"
+Issues        = "https://github.com/LOLA0786/LORK/issues"
+Changelog     = "https://github.com/LOLA0786/LORK/blob/main/CHANGELOG.md"
 
-# -------------------------------------------------------------------
-# Tool Configuration
-# -------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["lork"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "lork/",
+  "tests/",
+  "examples/",
+  "docs/",
+  "README.md",
+  "CONTRIBUTING.md",
+  "LICENSE",
+  "pyproject.toml"
+]
+
+exclude = [
+  "*.pyc",
+  "__pycache__/",
+  ".ruff_cache/",
+  "dist/",
+  "build/"
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
-addopts = "--tb=short -q"
+testpaths    = ["tests"]
+addopts      = "--tb=short -q --strict-markers"
+
+markers = [
+  "slow: marks tests as slow",
+  "integration: marks integration tests",
+  "e2e: marks end-to-end tests",
+]
 
 [tool.ruff]
-line-length = 100
+line-length    = 100
 target-version = "py311"
-select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+
+[tool.ruff.lint]
+select  = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "RUF"]
+ignore  = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lork"]
 
 [tool.mypy]
-python_version = "3.11"
-strict = true
+python_version         = "3.11"
+strict                 = true
 ignore_missing_imports = true
+show_error_codes       = true
 
 [tool.coverage.run]
 source = ["lork"]
-omit = ["tests/*", "examples/*"]
+omit   = ["tests/*", "examples/*", "lork/*/__init__.py"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 80
+fail_under   = 80
