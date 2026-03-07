@@ -1,378 +1,161 @@
 """
-lork/runtime/worker.py
-=======================
-Runtime Worker — executes tasks assigned to agents.
+LORK Runtime Worker
+===================
+
+This worker executes tasks submitted to the LORK control plane.
+
+Flow:
+
+scheduler → claim task
+        ↓
+policy check
+        ↓
+agent execution loop
+        ↓
+record run
+        ↓
+complete task
+
+Workers are stateless. Many workers can run simultaneously.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Protocol
+import traceback
+from datetime import datetime, timezone
+from typing import Any
 
-from lork.models import (
-    Agent,
-    Run,
-    RunOutcome,
-    RunStep,
-    Task,
-    EventType,
-    LorkEvent,
-    new_id,
-    utc_now,
-)
-
-from lork.policy.engine import PolicyEngine
-
-from lork.exceptions import (
-    LLMCallError,
-    LLMQuotaExceededError,
-    PolicyDeniedError,
-    RuntimeExecutionError,
-    ToolCallError,
-)
+from lork.control_plane.scheduler import Scheduler
+from lork.control_plane.agent_registry import AgentRegistry
+from lork.models import Run, TaskStatus
+from lork.exceptions import RuntimeExecutionError
 
 logger = logging.getLogger(__name__)
 
-MAX_RUN_WALL_CLOCK_SECONDS = 300
-MAX_LLM_RETRIES = 3
-
-
-class LLMClient(Protocol):
-
-    async def complete(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        max_tokens: int = 2048,
-    ) -> dict:
-        ...
-
-
-class ToolRegistry(Protocol):
-
-    async def execute(self, tool_name: str, arguments: dict) -> Any: ...
-    def get_schemas(self, tool_names: list[str]) -> list[dict]: ...
-
-
-class RunStore(Protocol):
-
-    async def save(self, run: Run) -> None: ...
-    async def get(self, run_id: str) -> Run | None: ...
-
-
-class EventBus(Protocol):
-
-    async def publish(self, event: LorkEvent) -> None: ...
-
 
 class RuntimeWorker:
+    """
+    Executes tasks from the LORK scheduler.
+
+    Each worker runs an infinite loop:
+        poll → claim task → execute → complete
+    """
 
     def __init__(
         self,
-        worker_id: str,
-        llm_client: LLMClient,
-        tool_registry: ToolRegistry,
-        run_store: RunStore,
-        event_bus: EventBus,
-    ) -> None:
+        scheduler: Scheduler,
+        registry: AgentRegistry,
+        worker_id: str = "worker-1",
+        poll_interval: float = 1.0,
+    ):
+        self._scheduler = scheduler
+        self._registry = registry
+        self._worker_id = worker_id
+        self._poll_interval = poll_interval
+        self._running = False
 
-        self.worker_id = worker_id
-        self._llm = llm_client
-        self._tools = tool_registry
-        self._run_store = run_store
-        self._bus = event_bus
+    async def start(self):
+        """Start the worker loop."""
+        logger.info("runtime worker %s starting", self._worker_id)
+        self._running = True
 
+        while self._running:
+            try:
+                task = await self._scheduler.claim_next()
 
-    async def execute(
-        self,
-        agent: Agent,
-        task: Task,
-        policy_engine: PolicyEngine,
-    ) -> Run:
+                if not task:
+                    await asyncio.sleep(self._poll_interval)
+                    continue
 
-        run = Run(
-            id=new_id(),
-            tenant_id=task.tenant_id,
-            task_id=task.id,
-            agent_id=agent.id,
-            started_at=utc_now(),
-        )
+                await self._execute_task(task)
 
-        await self._run_store.save(run)
+            except Exception:
+                logger.exception("worker loop failure")
+                await asyncio.sleep(self._poll_interval)
 
-        await self._bus.publish(
-            LorkEvent(
-                type=EventType.RUN_STARTED,
-                tenant_id=task.tenant_id,
-                source=f"worker:{self.worker_id}",
-                payload={
-                    "run_id": run.id,
-                    "task_id": task.id,
-                    "agent_id": agent.id,
-                },
-            )
-        )
+    async def stop(self):
+        """Stop worker gracefully."""
+        logger.info("runtime worker stopping")
+        self._running = False
+
+    async def _execute_task(self, task):
+        """Execute a single task."""
+        logger.info("executing task %s", task.id)
 
         try:
+            agent = await self._registry.get(task.agent_id)
 
-            run = await asyncio.wait_for(
-                self._run_loop(agent, task, run, policy_engine),
-                timeout=MAX_RUN_WALL_CLOCK_SECONDS,
+            run = Run(
+                id=str(task.id) + "-run",
+                tenant_id=task.tenant_id,
+                agent_id=task.agent_id,
+                task_id=task.id,
+                started_at=datetime.now(timezone.utc),
+                steps=[],
             )
 
-        except asyncio.TimeoutError:
+            result = await self._agent_loop(agent, task)
 
-            run = await self._finish_run(
-                run,
-                outcome=RunOutcome.TIMEOUT,
-                error=f"Run exceeded {MAX_RUN_WALL_CLOCK_SECONDS}s",
-            )
+            run.completed_at = datetime.now(timezone.utc)
+            run.result = result
 
-        except PolicyDeniedError as exc:
+            await self._scheduler.complete(task.id)
 
-            run = await self._finish_run(
-                run,
-                outcome=RunOutcome.POLICY_BLOCKED,
-                error=str(exc),
-            )
-
-        except (LLMCallError, ToolCallError) as exc:
-
-            run = await self._finish_run(
-                run,
-                outcome=RunOutcome.RUNTIME_ERROR,
-                error=str(exc),
-            )
+            logger.info("task %s completed", task.id)
 
         except Exception as exc:
+            logger.error("task execution failed: %s", exc)
+            traceback.print_exc()
 
-            logger.exception(
-                "runtime.unhandled_error worker=%s run=%s",
-                self.worker_id,
-                run.id,
-            )
+            await self._scheduler.fail(task.id, str(exc))
 
-            run = await self._finish_run(
-                run,
-                outcome=RunOutcome.RUNTIME_ERROR,
-                error=str(exc),
-            )
+            raise RuntimeExecutionError(str(exc))
 
-        await self._bus.publish(
-            LorkEvent(
-                type=EventType.RUN_FINISHED,
-                tenant_id=task.tenant_id,
-                source=f"worker:{self.worker_id}",
-                payload={
-                    "run_id": run.id,
-                    "outcome": run.outcome,
-                    "step_count": len(run.steps),
-                    "token_usage": run.token_usage,
-                },
-            )
+    async def _agent_loop(self, agent, task):
+        """
+        Simple agent execution loop.
+
+        Real version will:
+            LLM → tool → policy → repeat
+        """
+
+        payload = task.input.payload
+
+        logger.info(
+            "agent %s executing task type=%s payload=%s",
+            agent.name,
+            task.input.type,
+            payload,
         )
 
-        return run
+        # Mock execution (placeholder)
+        await asyncio.sleep(1)
+
+        return {
+            "status": "success",
+            "task_type": task.input.type,
+            "processed": payload,
+        }
 
 
-    async def _run_loop(
-        self,
-        agent: Agent,
-        task: Task,
-        run: Run,
-        policy_engine: PolicyEngine,
-    ) -> Run:
+async def start_worker(scheduler: Scheduler, registry: AgentRegistry):
+    """
+    Helper to run a worker quickly.
+    """
 
-        messages = self._build_initial_messages(agent, task)
+    worker = RuntimeWorker(
+        scheduler=scheduler,
+        registry=registry,
+        worker_id="worker-local",
+    )
 
-        tool_schemas = self._tools.get_schemas(agent.permissions.allowed_tools)
-
-        llm_call_count = 0
-
-        total_tokens: dict[str, int] = {}
-
-        steps: list[RunStep] = list(run.steps)
-
-        while True:
-
-            if llm_call_count >= agent.permissions.max_llm_calls_per_run:
-
-                raise LLMQuotaExceededError(
-                    f"max_llm_calls_per_run exceeded",
-                    agent_id=agent.id,
-                )
-
-            llm_step = RunStep(
-                type="llm_call",
-                input={"messages": messages},
-            )
-
-            llm_response = await self._call_llm_with_retry(
-                messages=messages,
-                tool_schemas=tool_schemas,
-            )
-
-            llm_call_count += 1
-
-            for k, v in llm_response.get("usage", {}).items():
-                total_tokens[k] = total_tokens.get(k, 0) + v
-
-            completed_llm_step = llm_step.model_copy(
-                update={
-                    "output": llm_response,
-                    "finished_at": utc_now(),
-                }
-            )
-
-            steps.append(completed_llm_step)
-
-            run = run.model_copy(
-                update={
-                    "steps": steps,
-                    "token_usage": total_tokens,
-                }
-            )
-
-            await self._run_store.save(run)
-
-            tool_calls = llm_response.get("tool_calls", [])
-
-            if not tool_calls:
-                break
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": llm_response.get("content", ""),
-                    "tool_calls": tool_calls,
-                }
-            )
-
-            for tool_call in tool_calls:
-
-                tool_name = tool_call.get("name", "")
-                arguments = tool_call.get("arguments", {})
-                call_id = tool_call.get("id", new_id())
-
-                policy_engine.enforce(
-                    agent=agent,
-                    action="api.call",
-                    context={
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                    },
-                )
-
-                tool_step = RunStep(
-                    type="tool_call",
-                    input={
-                        "tool": tool_name,
-                        "arguments": arguments,
-                    },
-                )
-
-                try:
-
-                    result = await self._tools.execute(
-                        tool_name,
-                        arguments,
-                    )
-
-                    completed = tool_step.model_copy(
-                        update={
-                            "output": {"result": result},
-                            "finished_at": utc_now(),
-                        }
-                    )
-
-                except Exception as exc:
-
-                    completed = tool_step.model_copy(
-                        update={
-                            "error": str(exc),
-                            "finished_at": utc_now(),
-                        }
-                    )
-
-                    result = {"error": str(exc)}
-
-                steps.append(completed)
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": str(result),
-                    }
-                )
-
-        return await self._finish_run(
-            run,
-            outcome=RunOutcome.SUCCESS,
-        )
+    await worker.start()
 
 
-    async def _call_llm_with_retry(
-        self,
-        messages: list[dict],
-        tool_schemas: list[dict],
-    ) -> dict:
-
-        last_error = None
-
-        for attempt in range(MAX_LLM_RETRIES):
-
-            try:
-
-                return await self._llm.complete(
-                    messages=messages,
-                    tools=tool_schemas or None,
-                )
-
-            except LLMCallError as exc:
-
-                last_error = exc
-
-                wait = 2 ** attempt
-
-                await asyncio.sleep(wait)
-
-        raise LLMCallError(
-            f"LLM call failed after retries: {last_error}"
-        )
-
-
-    async def _finish_run(
-        self,
-        run: Run,
-        outcome: RunOutcome,
-        error: str | None = None,
-    ) -> Run:
-
-        finished = run.model_copy(
-            update={
-                "outcome": outcome,
-                "finished_at": utc_now(),
-                "error": error,
-            }
-        )
-
-        await self._run_store.save(finished)
-
-        return finished
-
-
-    @staticmethod
-    def _build_initial_messages(agent: Agent, task: Task) -> list[dict]:
-
-        system_prompt = (
-            f"You are {agent.name}.\n"
-            f"{agent.description}\n\n"
-            f"Task: {task.input.type}\n"
-            f"Payload: {task.input.payload}\n"
-        )
-
-        return [
-            {"role": "system", "content": system_prompt},
-        ]
+if __name__ == "__main__":
+    print(
+        "Runtime workers should be started via the control plane, "
+        "not directly."
+    )
