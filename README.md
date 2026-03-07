@@ -2,188 +2,234 @@
 
 **Control Plane for AI Agents**
 
-LORK is infrastructure for managing and operating AI workers safely in production.
-
-As organizations deploy autonomous agents for operations, finance, support, and research, they need a system that provides identity, permissions, governance, and observability.
-
-LORK provides that control layer.
+> In the same way Kubernetes became the control plane for containers,  
+> LORK is the control plane for AI workers.
 
 ---
 
-# Vision
+# What is LORK?
 
-In the same way that Kubernetes became the control plane for containers, LORK aims to become the control plane for AI workers.
+Companies are deploying AI agents to run real operations:
 
-Companies will run thousands of AI agents.  
-Those agents must operate with security, permissions, auditability, and operational control.
+- processing invoices
+- answering support tickets
+- running internal workflows
+- managing infrastructure
+- performing research
 
-LORK provides the infrastructure to manage them.
+But most agents today run with **no identity, no permissions, no audit trail, and no governance**.
+
+LORK provides the **infrastructure layer for running AI workers safely at scale**.
+
+| Without LORK | With LORK |
+|---|---|
+| Agents run with no identity | Every agent has a unique ID |
+| No permission system | Default-deny policy engine |
+| Ad-hoc task execution | Priority scheduler with deadlines |
+| No observability | Full execution traces (Run records) |
+| No governance | Policy enforcement on every action |
+| Hard to scale | Stateless workers + pluggable storage |
 
 ---
 
-# Core Capabilities
+# Quickstart
 
-LORK provides five core capabilities:
+Install:
 
-### 1. Agent Identity
-Every AI worker must have a unique identity and ownership.
+
+pip install lork
+
 
 Example:
 
-agent_id: finance_agent  
-owner: acme_corp  
-permissions: invoice.read, payment.request  
+```python
+import asyncio
+from lork.sdk.client import LorkClient
 
----
+async def main():
+    async with LorkClient.embedded() as lork:
 
-### 2. Policy Enforcement
-Before an agent executes any action, LORK verifies that the action is permitted.
+        agent = await lork.agents.register(
+            tenant_id="acme-corp",
+            name="invoice_processor",
+            description="Processes vendor invoices.",
+            allowed_actions=["finance.read", "data.read", "email.send"],
+        )
 
-Example policy:
+        await lork.agents.activate(agent.id)
 
-- AI agents cannot transfer funds without approval
-- AI agents cannot delete production data
-- AI agents must log financial actions
+        task = await lork.tasks.submit(
+            tenant_id="acme-corp",
+            agent_id=agent.id,
+            task_type="process_invoice",
+            payload={"invoice_id": "INV-001", "amount": 4500.00},
+        )
 
----
+        print(task.id)
 
-### 3. Task Orchestration
-LORK schedules and assigns tasks to AI agents.
+asyncio.run(main())
 
-Example tasks:
+Run the full demo:
 
-- process invoice
-- summarize report
-- answer support ticket
+python examples/demo_agent.py
+Core Concepts
+Agent
 
----
+An AI worker with identity, permissions, and lifecycle.
 
-### 4. Execution Runtime
-Agents execute tasks in controlled runtime workers.
+Lifecycle:
 
-The runtime connects to LLMs, tools, and APIs while enforcing governance rules.
-
----
-
-### 5. Monitoring & Audit
-All agent actions are recorded for auditability and debugging.
-
-Logs include:
-
-- agent decisions
-- executed actions
-- policy checks
-- failures
-
----
-
-# High Level Architecture
-
-AI Agents  
-    ↓  
-LORK SDK  
-    ↓  
-LORK Control Plane  
-    ↓  
-Agent Runtime Workers  
-    ↓  
-External Tools / APIs / Databases
-
----
-
-# System Components
-
-## Control Plane
-Responsible for management and governance.
-
-Components:
-
-- Agent Registry
-- Policy Engine
-- Task Scheduler
-- Audit Logger
-- Monitoring APIs
-
----
-
-## Runtime Workers
-Execute agent tasks safely.
-
-Responsibilities:
-
-- run LLM calls
-- execute tool actions
-- enforce runtime policies
-- stream execution logs
-
----
-
-## Developer SDK
-SDK for developers to run agents on LORK.
+PENDING → ACTIVE → SUSPENDED → RETIRED
 
 Example:
 
-from lork import Agent
-
-agent = Agent(
+agent = await lork.agents.register(
+    tenant_id="my-org",
     name="support_agent",
-    permissions=["email.send","crm.read"]
+    allowed_actions=["email.send", "crm.read"],
 )
+Policy
 
-agent.run()
+Governance rules controlling agent behavior.
 
----
+Default model:
 
-# Repository Structure (Planned)
+DENY everything unless explicitly allowed
 
+Example:
+
+PolicyRule(
+    effect=PolicyEffect.DENY,
+    actions=["finance.transfer"],
+    conditions=[
+        PolicyCondition(field="amount", operator="gt", value=10000)
+    ]
+)
+Task
+
+Unit of work assigned to an agent.
+
+QUEUED → ASSIGNED → RUNNING → SUCCEEDED
+
+Example:
+
+task = await lork.tasks.submit(
+    tenant_id="org",
+    agent_id=agent.id,
+    task_type="summarize_report",
+    payload={"url": "..."},
+)
+Run
+
+A full execution trace of a task:
+
+LLM calls
+
+tool invocations
+
+policy checks
+
+outputs
+
+token usage
+
+Runs are immutable audit records.
+
+Architecture
+Application
+     │
+     ▼
+┌─────────────────────────────┐
+│        LORK Control Plane   │
+│                             │
+│  Agent Registry             │
+│  Task Scheduler             │
+│  Policy Engine              │
+└──────────────┬──────────────┘
+               │
+               ▼
+        Runtime Workers
+               │
+               ▼
+     Tools • APIs • LLMs
+
+Runtime workers are stateless, allowing horizontal scaling.
+
+Repository Structure
 lork/
- ├── control_plane
- │   ├── api.py
- │   ├── agent_registry.py
- │   ├── scheduler.py
- │   └── audit_logger.py
- │
- ├── runtime
- │   ├── worker.py
- │   └── executor.py
- │
- ├── policy
- │   └── policy_engine.py
- │
- ├── sdk
- │   └── agent_client.py
- │
- └── examples
-     └── demo_agent.py
+├── lork/
+│   ├── models.py
+│   ├── exceptions.py
+│   ├── control_plane/
+│   ├── policy/
+│   ├── runtime/
+│   ├── storage/
+│   └── sdk/
+│
+├── tests/
+│   ├── unit/
+│   └── integration/
+│
+├── examples/
+│   └── demo_agent.py
+Where to Start Reading
 
----
+1️⃣ lork/models.py
+2️⃣ lork/exceptions.py
+3️⃣ lork/policy/engine.py
+4️⃣ examples/demo_agent.py
 
-# Initial Goals
+Roadmap
+Phase 1 — Core
 
-Phase 1 (Prototype)
+Agent identity
 
-- agent registry
-- permission system
-- simple task scheduler
-- runtime worker
-- logging
+Policy engine
 
-Phase 2
+Task scheduler
 
-- distributed runtimes
-- policy framework
-- monitoring dashboard
-- enterprise security controls
+Runtime workers
 
-Phase 3
+Python SDK
 
-- large scale AI workforce orchestration
-- multi-agent coordination
-- enterprise integrations
+Phase 2 — Production
 
----
+REST API
 
-# Long-Term Goal
+Postgres storage
 
-LORK aims to provide the infrastructure layer for operating AI workers at scale across organizations.
+Redis queue
 
+Metrics + tracing
+
+Kubernetes deployment
+
+Phase 3 — Scale
+
+Multi-agent orchestration
+
+Human approval workflows
+
+Streaming execution logs
+
+Enterprise authentication
+
+Why LORK Exists
+
+AI agents are becoming operational infrastructure.
+
+But companies will not trust agents unless they have:
+
+identity
+
+permissions
+
+governance
+
+auditability
+
+LORK provides that foundation.
+
+License
+
+Apache 2.0
