@@ -1,161 +1,232 @@
 """
-LORK Runtime Worker
-===================
+LORK Runtime Worker.
 
-This worker executes tasks submitted to the LORK control plane.
-
-Flow:
-
-scheduler → claim task
-        ↓
-policy check
-        ↓
-agent execution loop
-        ↓
-record run
-        ↓
-complete task
-
-Workers are stateless. Many workers can run simultaneously.
+Executes agent tasks via Celery. Each task runs an LLM-backed agent loop
+with tool use, policy enforcement, and step-by-step audit logging.
 """
-
 from __future__ import annotations
 
 import asyncio
-import logging
-import traceback
+import time
 from datetime import datetime, timezone
 from typing import Any
 
-from lork.control_plane.scheduler import Scheduler
-from lork.control_plane.agent_registry import AgentRegistry
-from lork.models import Run, TaskStatus
-from lork.exceptions import RuntimeExecutionError
+from celery import Task as CeleryTask
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-logger = logging.getLogger(__name__)
+from lork.runtime.celery_app import celery_app
+from lork.config import get_settings
+from lork.models import TaskStep
+from lork.observability.logging import get_logger
+from lork.runtime.executors.llm_executor import LLMExecutor
+from lork.runtime.executors.tool_registry import ToolRegistry
+
+log = get_logger(__name__)
 
 
-class RuntimeWorker:
-    """
-    Executes tasks from the LORK scheduler.
+class BaseTask(CeleryTask):
+    """Base class with error handling and retry logic."""
 
-    Each worker runs an infinite loop:
-        poll → claim task → execute → complete
-    """
+    abstract = True
 
-    def __init__(
-        self,
-        scheduler: Scheduler,
-        registry: AgentRegistry,
-        worker_id: str = "worker-1",
-        poll_interval: float = 1.0,
-    ):
-        self._scheduler = scheduler
-        self._registry = registry
-        self._worker_id = worker_id
-        self._poll_interval = poll_interval
-        self._running = False
-
-    async def start(self):
-        """Start the worker loop."""
-        logger.info("runtime worker %s starting", self._worker_id)
-        self._running = True
-
-        while self._running:
-            try:
-                task = await self._scheduler.claim_next()
-
-                if not task:
-                    await asyncio.sleep(self._poll_interval)
-                    continue
-
-                await self._execute_task(task)
-
-            except Exception:
-                logger.exception("worker loop failure")
-                await asyncio.sleep(self._poll_interval)
-
-    async def stop(self):
-        """Stop worker gracefully."""
-        logger.info("runtime worker stopping")
-        self._running = False
-
-    async def _execute_task(self, task):
-        """Execute a single task."""
-        logger.info("executing task %s", task.id)
-
-        try:
-            agent = await self._registry.get(task.agent_id)
-
-            run = Run(
-                id=str(task.id) + "-run",
-                tenant_id=task.tenant_id,
-                agent_id=task.agent_id,
-                task_id=task.id,
-                started_at=datetime.now(timezone.utc),
-                steps=[],
-            )
-
-            result = await self._agent_loop(agent, task)
-
-            run.completed_at = datetime.now(timezone.utc)
-            run.result = result
-
-            await self._scheduler.complete(task.id)
-
-            logger.info("task %s completed", task.id)
-
-        except Exception as exc:
-            logger.error("task execution failed: %s", exc)
-            traceback.print_exc()
-
-            await self._scheduler.fail(task.id, str(exc))
-
-            raise RuntimeExecutionError(str(exc))
-
-    async def _agent_loop(self, agent, task):
-        """
-        Simple agent execution loop.
-
-        Real version will:
-            LLM → tool → policy → repeat
-        """
-
-        payload = task.input.payload
-
-        logger.info(
-            "agent %s executing task type=%s payload=%s",
-            agent.name,
-            task.input.type,
-            payload,
+    def on_failure(self, exc: Exception, task_id: str, args: list, kwargs: dict, einfo: Any) -> None:
+        log.error(
+            "celery.task.failure",
+            celery_task_id=task_id,
+            error=str(exc),
+            exc_type=type(exc).__name__,
         )
 
-        # Mock execution (placeholder)
-        await asyncio.sleep(1)
-
-        return {
-            "status": "success",
-            "task_type": task.input.type,
-            "processed": payload,
-        }
+    def on_retry(self, exc: Exception, task_id: str, args: list, kwargs: dict, einfo: Any) -> None:
+        log.warning("celery.task.retry", celery_task_id=task_id, error=str(exc))
 
 
-async def start_worker(scheduler: Scheduler, registry: AgentRegistry):
-    """
-    Helper to run a worker quickly.
-    """
-
-    worker = RuntimeWorker(
-        scheduler=scheduler,
-        registry=registry,
-        worker_id="worker-local",
+@celery_app.task(
+    bind=True,
+    base=BaseTask,
+    name="lork.runtime.worker.dispatch_task",
+    max_retries=3,
+    default_retry_delay=30,
+    acks_late=True,
+)
+def dispatch_task(self: CeleryTask, task_id: str, organization_id: str) -> dict[str, Any]:
+    """Main task dispatch — runs the agent execution loop."""
+    return asyncio.get_event_loop().run_until_complete(
+        _execute_task(self, task_id, organization_id)
     )
 
-    await worker.start()
+
+async def _execute_task(
+    celery_task: CeleryTask,
+    task_id: str,
+    organization_id: str,
+) -> dict[str, Any]:
+
+    from lork.storage.db import db_session
+    from sqlalchemy import select
+    from lork.models import Agent, Task
+
+    log.info("task.execution.start", task_id=task_id, org=organization_id)
+    start_time = time.perf_counter()
+
+    async with db_session() as db:
+
+        task_result = await db.execute(select(Task).where(Task.id == task_id))
+        task = task_result.scalar_one_or_none()
+
+        if task is None:
+            log.error("task.execution.not_found", task_id=task_id)
+            return {"error": "Task not found"}
+
+        agent = None
+        if task.agent_id:
+            agent_result = await db.execute(select(Agent).where(Agent.id == task.agent_id))
+            agent = agent_result.scalar_one_or_none()
+
+        task.status = "running"
+        task.started_at = datetime.now(timezone.utc)
+        task.celery_task_id = celery_task.request.id
+        await db.flush()
+
+        try:
+
+            settings = get_settings()
+
+            tool_registry = ToolRegistry()
+
+            executor = LLMExecutor(
+                provider=agent.llm_provider if agent else settings.DEFAULT_LLM_PROVIDER,
+                model=agent.llm_model if agent else settings.DEFAULT_LLM_MODEL,
+                system_prompt=agent.system_prompt if agent else "",
+                max_steps=settings.AGENT_MAX_EXECUTION_STEPS,
+                tool_registry=tool_registry,
+            )
+
+            result = await executor.run(
+                task_type=task.task_type,
+                input_data=task.input_data,
+                agent_id=str(task.agent_id) if task.agent_id else None,
+                organization_id=organization_id,
+                db=db,
+                task_id=task_id,
+            )
+
+            task.status = "completed"
+            task.output_data = result
+            task.completed_at = datetime.now(timezone.utc)
+            await db.flush()
+
+            duration = time.perf_counter() - start_time
+
+            log.info(
+                "task.execution.completed",
+                task_id=task_id,
+                duration_s=round(duration, 3),
+            )
+
+            return result
+
+        except Exception as exc:
+
+            duration = time.perf_counter() - start_time
+
+            log.error(
+                "task.execution.error",
+                task_id=task_id,
+                error=str(exc),
+                duration_s=round(duration, 3),
+                exc_info=True,
+            )
+
+            should_retry = task.retry_count < task.max_retries
+
+            if should_retry:
+                task.retry_count += 1
+                task.status = "queued"
+            else:
+                task.status = "failed"
+                task.completed_at = datetime.now(timezone.utc)
+
+            task.error = str(exc)
+
+            await db.flush()
+
+            if should_retry:
+                raise celery_task.retry(exc=exc, countdown=30 * task.retry_count)
+
+            return {"error": str(exc)}
 
 
-if __name__ == "__main__":
-    print(
-        "Runtime workers should be started via the control plane, "
-        "not directly."
+@celery_app.task(name="lork.runtime.worker.cleanup_stale_tasks")
+def cleanup_stale_tasks() -> None:
+    asyncio.get_event_loop().run_until_complete(_cleanup_stale())
+
+
+async def _cleanup_stale() -> None:
+
+    from datetime import timedelta
+    from sqlalchemy import update
+    from lork.storage.db import db_session
+    from lork.models import Task, TaskStatus
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=300)
+
+    async with db_session() as db:
+
+        stmt = (
+            update(Task)
+            .where(
+                Task.status == TaskStatus.RUNNING,
+                Task.started_at < cutoff,
+            )
+            .values(status=TaskStatus.TIMED_OUT, completed_at=datetime.now(timezone.utc))
+        )
+
+        result = await db.execute(stmt)
+
+        if result.rowcount:
+            log.warning("task.cleanup.timed_out", count=result.rowcount)
+
+
+@celery_app.task(name="lork.runtime.worker.check_agent_heartbeats")
+def check_agent_heartbeats() -> None:
+    asyncio.get_event_loop().run_until_complete(_check_heartbeats())
+
+
+async def _check_heartbeats() -> None:
+
+    from datetime import timedelta
+    from sqlalchemy import update
+    from lork.storage.db import db_session
+    from lork.models import Agent, AgentStatus
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    async with db_session() as db:
+
+        stmt = (
+            update(Agent)
+            .where(
+                Agent.status == AgentStatus.ACTIVE,
+                Agent.last_heartbeat_at < cutoff,
+            )
+            .values(status=AgentStatus.ERROR)
+        )
+
+        result = await db.execute(stmt)
+
+        if result.rowcount:
+            log.warning("agent.heartbeat.missed", count=result.rowcount)
+
+
+def start() -> None:
+
+    celery_app.worker_main(
+        argv=[
+            "worker",
+            "--loglevel=info",
+            "--queues=agent_tasks,maintenance",
+            "--concurrency=4",
+            "--max-tasks-per-child=100",
+        ]
     )
