@@ -6,86 +6,142 @@ Containers → Kubernetes
 Functions → Serverless  
 Agents → LORK
 
-LORK provides infrastructure for running, observing, and debugging autonomous AI systems in production. It introduces deterministic execution, event-sourced agent runs, and time-travel debugging for complex AI workflows.
-
-The system is designed as a control plane for agent orchestration, providing the operational guarantees engineers expect from modern distributed systems.
-
----
-
-## Core Capabilities
-
-**Event-Sourced Execution**
-
-Every agent step is recorded as an immutable event.  
-This provides a complete execution history and enables deterministic replay.
-
-**Time-Travel Debugging**
-
-Engineers can inspect the exact timeline of an AI run, including every step, tool invocation, and decision made during execution.
-
-**Run Replay**
-
-Historical runs can be replayed deterministically, enabling debugging and reproducibility.
-
-**Run Forking**
-
-Existing runs can be forked into new timelines, allowing engineers to explore alternate execution paths without modifying the original run.
-
-**Agent Graph Execution**
-
-Multi-agent workflows are executed as directed graphs where agents coordinate through defined actions and tool calls.
+LORK provides infrastructure for running, observing, and debugging autonomous AI systems in production.  
+The system introduces deterministic execution, event-sourced agent runs, and time-travel debugging for complex AI workflows.
 
 ---
 
-## Quick Example
+# Why LORK Exists
 
-Workflow specification:
+AI agents behave like distributed systems.
 
+They call tools, query models, access APIs, and make multi-step decisions.  
+Traditional debugging tools are insufficient for this class of systems.
 
-workflows/support_ticket.yaml
+LORK introduces infrastructure primitives that make AI systems observable and reproducible.
 
+Key ideas:
 
-Run the workflow:
+• event-sourced execution  
+• deterministic replay  
+• run forking  
+• execution tracing  
+• timeline inspection
+
+---
+
+# Quickstart
+
+Run a workflow.
 
 
 python cmd/lork-run-workflow.py workflows/support_ticket.yaml
 
 
-List runs:
+Example output:
+
+
+Starting run: e9268751...
+[1] support_agent -> read_ticket
+[2] support_agent -> search_docs
+[3] support_agent -> draft_reply
+Run complete: e9268751...
+
+
+---
+
+# List Runs
 
 
 python cmd/lork-debug-run.py --list
 
 
-Inspect a run:
+Example:
 
 
-python cmd/lork-debug-run.py <run_id>
+Available runs:
+
+e9268751...
+
+317e26ee...
+
+test-run
 
 
-Trace execution:
+---
+
+# Inspect Run Execution
+
+
+python cmd/lork-inspect-run.py <run_id>
+
+
+Example output:
+
+RUN INSPECTION
+
+run_id: e9268751...
+
+EXECUTION TIMELINE
+
+[1] agent_step | agent=support_agent | payload={'action': 'read_ticket'}
+[2] agent_step | agent=support_agent | payload={'action': 'search_docs'}
+[3] agent_step | agent=support_agent | payload={'action': 'draft_reply'}
+
+EXECUTION GRAPH
+
+support_agent
+└ read_ticket
+└ search_docs
+└ draft_reply
+
+
+This command displays both the execution timeline and the logical graph of the agent workflow.
+
+---
+
+# Trace Execution
 
 
 python cmd/lork-trace-run.py <run_id>
 
 
-Replay a run:
+Example:
+
+
+support_agent
+└ read_ticket
+└ search_docs
+└ draft_reply
+
+
+---
+
+# Replay Run
 
 
 python cmd/lork-replay-run.py <run_id>
 
 
-Fork a run:
+Replay re-executes a historical run using its event log.
+
+This enables deterministic debugging and reproduction of failures.
+
+---
+
+# Fork Run
 
 
 python cmd/lork-fork-run.py <run_id>
 
 
+Forking creates a new run derived from an existing event history.
+
+This allows engineers to explore alternate execution paths without modifying the original run.
+
 ---
 
-## Architecture Overview
-
-Applications interact with the LORK control plane, which manages workflow execution and state.
+# Architecture
 
 
 Applications
@@ -94,7 +150,6 @@ Applications
 LORK Control Plane
 │
 ├ Workflow Specifications
-├ Controller Loop
 ├ Scheduler
 ├ Agent Graph
 ├ Policy Engine
@@ -108,45 +163,49 @@ Runtime Workers
 Tools / APIs / LLMs
 
 
-The architecture separates orchestration logic from runtime execution, allowing the system to scale and remain observable.
+The architecture separates orchestration from execution.
+
+The control plane manages workflow state, while runtime workers execute agent actions.
 
 ---
 
-## Key Concepts
+# Execution Model
 
-**Workflow**
+LORK uses an event-sourced execution model.
 
-A declarative specification describing a sequence or graph of agent actions.
+Each step in a workflow generates an immutable event.
 
-**Run**
+Example event structure:
 
-A single execution instance of a workflow.
 
-**Event**
+run_id
+sequence
+timestamp
+type
+agent_id
+payload
 
-An immutable record describing a step in the execution timeline.
 
-**Replay**
-
-Re-execution of a historical run from its event log.
-
-**Fork**
-
-Creation of a new run derived from the event history of an existing run.
+Events are appended to the event store and become the authoritative record of execution.
 
 ---
 
-## Why LORK Exists
+# Time-Travel Debugging
 
-As AI agents become more autonomous, engineering teams require infrastructure capable of managing complex decision-making systems.
+Because runs are event-sourced, engineers can inspect historical execution timelines.
 
-Traditional debugging tools are insufficient for systems driven by probabilistic models and external tool calls.
+Capabilities include:
 
-LORK addresses this challenge by introducing deterministic execution, event-sourced state, and replayable agent workflows.
+• timeline inspection  
+• execution tracing  
+• deterministic replay  
+• run forking
+
+This model allows AI workflows to be debugged using techniques similar to distributed systems.
 
 ---
 
-## Repository Structure
+# Repository Structure
 
 
 lork/
@@ -158,18 +217,56 @@ lork/
 └ infra/
 
 
-The project separates control-plane logic, runtime execution, and developer tooling into clearly defined modules.
+Key directories:
+
+cmd/  
+CLI tools for running and debugging workflows.
+
+lork/  
+Core platform implementation including runtime, scheduler, and state engine.
+
+workflows/  
+Example workflow specifications.
+
+docs/  
+Architecture and system design documentation.
 
 ---
 
-## Status
+# Example Workflow
 
-LORK is currently early-stage infrastructure under active development.
 
-The goal is to establish the operational foundation required for reliable AI agent systems.
+workflows/support_ticket.yaml
+
+
+Example:
+
+
+name: support-ticket
+
+steps:
+
+agent: support_agent
+action: read_ticket
+
+agent: support_agent
+action: search_docs
+
+agent: support_agent
+action: draft_reply
+
 
 ---
 
-## License
+# Current Status
+
+LORK is early-stage infrastructure under active development.
+
+The goal is to build the operational foundation required to run autonomous AI systems safely and reliably.
+
+---
+
+# License
 
 Apache 2.0
+
