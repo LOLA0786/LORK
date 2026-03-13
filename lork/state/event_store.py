@@ -1,20 +1,20 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, List
-from uuid import UUID
+import json
 
-import sqlalchemy as sa
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-@dataclass(frozen=True)
+@dataclass
 class RunEvent:
-    run_id: UUID
+    run_id: str
     sequence: int
     timestamp: datetime
     type: str
     agent_id: str
-    payload: dict[str, Any]
+    payload: dict
 
 
 class EventStore:
@@ -22,9 +22,10 @@ class EventStore:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+
     async def append(self, event: RunEvent):
 
-        stmt = sa.text("""
+        stmt = text("""
         INSERT INTO run_events (
             run_id,
             sequence,
@@ -39,24 +40,25 @@ class EventStore:
             :timestamp,
             :type,
             :agent_id,
-            :payload::jsonb
+            :payload
         )
         """)
 
         await self.session.execute(stmt, {
-            "run_id": str(event.run_id),
+            "run_id": event.run_id,
             "sequence": event.sequence,
-            "timestamp": event.timestamp,
+            "timestamp": event.timestamp.isoformat() if hasattr(event.timestamp, "isoformat") else event.timestamp,
             "type": event.type,
             "agent_id": event.agent_id,
-            "payload": event.payload
+            "payload": json.dumps(event.payload)
         })
 
         await self.session.commit()
 
-    async def get_run_events(self, run_id: str) -> List[RunEvent]:
 
-        stmt = sa.text("""
+    async def get_run_events(self, run_id: str):
+
+        stmt = text("""
         SELECT run_id, sequence, timestamp, type, agent_id, payload
         FROM run_events
         WHERE run_id = :run_id
@@ -64,16 +66,21 @@ class EventStore:
         """)
 
         result = await self.session.execute(stmt, {"run_id": run_id})
+
         rows = result.fetchall()
 
-        return [
-            RunEvent(
-                run_id=row.run_id,
-                sequence=row.sequence,
-                timestamp=row.timestamp,
-                type=row.type,
-                agent_id=row.agent_id,
-                payload=row.payload
+        events: List[RunEvent] = []
+
+        for r in rows:
+            events.append(
+                RunEvent(
+                    run_id=r[0],
+                    sequence=r[1],
+                    timestamp=r[2],
+                    type=r[3],
+                    agent_id=r[4],
+                    payload=json.loads(r[5])
+                )
             )
-            for row in rows
-        ]
+
+        return events
