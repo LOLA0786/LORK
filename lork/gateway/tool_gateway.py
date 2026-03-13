@@ -15,10 +15,7 @@ class ToolGateway:
         allowed = await self.policy_engine.check(
             agent_id=agent_id,
             action=f"tool:{tool_name}",
-            context={
-                "run_id": run_id,
-                "args": args
-            }
+            context={"run_id": run_id, "args": args}
         )
 
         if not allowed:
