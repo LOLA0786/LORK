@@ -1,199 +1,175 @@
 # LORK
 
-**Control Plane for AI Agents**
+Control Plane for AI Agents.
 
-> Just like Kubernetes manages containers,  
-> **LORK manages autonomous AI workers.**
+Containers → Kubernetes  
+Functions → Serverless  
+Agents → LORK
 
-AI agents are starting to run real operations:
-- processing invoices
-- answering support tickets
-- executing workflows
-- interacting with APIs
+LORK provides infrastructure for running, observing, and debugging autonomous AI systems in production. It introduces deterministic execution, event-sourced agent runs, and time-travel debugging for complex AI workflows.
 
-But today they run with **no infrastructure**.
-
-No identity.  
-No permissions.  
-No replay debugging.  
-No audit trail.
-
-**LORK fixes this.**
+The system is designed as a control plane for agent orchestration, providing the operational guarantees engineers expect from modern distributed systems.
 
 ---
 
-# The Problem
+## Core Capabilities
 
-Today most AI agent systems look like this:
+**Event-Sourced Execution**
 
+Every agent step is recorded as an immutable event.  
+This provides a complete execution history and enables deterministic replay.
 
-LLM → Tools → Chaos
+**Time-Travel Debugging**
 
+Engineers can inspect the exact timeline of an AI run, including every step, tool invocation, and decision made during execution.
 
-Agents can call APIs, modify data, and make decisions — but there is **no control layer** governing those actions.
+**Run Replay**
 
-When something goes wrong:
+Historical runs can be replayed deterministically, enabling debugging and reproducibility.
 
-- Why did the agent send that email?
-- Why did it delete data?
-- Why did it transfer money?
+**Run Forking**
 
-You cannot answer those questions.
+Existing runs can be forked into new timelines, allowing engineers to explore alternate execution paths without modifying the original run.
 
----
+**Agent Graph Execution**
 
-# The Solution
-
-LORK introduces an infrastructure layer between the agent and the real world.
-
-
-LLM → LORK → Tools
-
-
-LORK provides:
-
-- Agent identity
-- Policy enforcement
-- Task orchestration
-- Execution runtime
-- Immutable event logs
-- Replayable runs
-- Time-travel debugging
+Multi-agent workflows are executed as directed graphs where agents coordinate through defined actions and tool calls.
 
 ---
 
-# Quick Example
+## Quick Example
 
-```python
-import asyncio
-from lork.sdk.client import LorkClient
+Workflow specification:
 
-async def main():
 
-    async with LorkClient.embedded() as lork:
+workflows/support_ticket.yaml
 
-        agent = await lork.agents.register(
-            tenant_id="acme",
-            name="support_agent",
-            allowed_actions=["email.send", "data.read"]
-        )
 
-        await lork.agents.activate(agent.id)
+Run the workflow:
 
-        task = await lork.tasks.submit(
-            tenant_id="acme",
-            agent_id=agent.id,
-            task_type="answer_support_ticket",
-            payload={"ticket": "TICK-1"}
-        )
 
-        print(task.status)
+python cmd/lork-run-workflow.py workflows/support_ticket.yaml
 
-asyncio.run(main())
-Time-Travel Debugging for Agents
 
-Every agent run is stored as an immutable event log.
+List runs:
 
-You can replay any run:
 
-await lork.runs.replay(run_id)
+python cmd/lork-debug-run.py --list
 
-Or fork the run into a new timeline:
 
-await lork.runs.fork(run_id)
+Inspect a run:
 
-This allows engineers to debug AI systems the same way they debug software.
 
-Architecture
-                Your Application
-                        │
-                        ▼
-             ┌────────────────────┐
-             │   LORK Control     │
-             │       Plane        │
-             ├────────────────────┤
-             │ Agent Registry     │
-             │ Policy Engine      │
-             │ Task Scheduler     │
-             │ State Engine       │
-             │ Replay Engine      │
-             └──────────┬─────────┘
-                        │
-                        ▼
-                 Runtime Workers
-                        │
-                        ▼
-                 Tools / APIs / LLMs
-Core Components
-Component	Purpose
-Agent Registry	Identity and lifecycle of agents
-Policy Engine	Default-deny governance layer
-Task Scheduler	Priority task orchestration
-Runtime Workers	Distributed agent execution
-State Engine	Event-sourced execution history
-Replay Engine	Deterministic run replay
-Observability	Metrics and tracing
-Repository Structure
+python cmd/lork-debug-run.py <run_id>
+
+
+Trace execution:
+
+
+python cmd/lork-trace-run.py <run_id>
+
+
+Replay a run:
+
+
+python cmd/lork-replay-run.py <run_id>
+
+
+Fork a run:
+
+
+python cmd/lork-fork-run.py <run_id>
+
+
+---
+
+## Architecture Overview
+
+Applications interact with the LORK control plane, which manages workflow execution and state.
+
+
+Applications
+│
+▼
+LORK Control Plane
+│
+├ Workflow Specifications
+├ Controller Loop
+├ Scheduler
+├ Agent Graph
+├ Policy Engine
+├ Event Store
+└ Observability
+│
+▼
+Runtime Workers
+│
+▼
+Tools / APIs / LLMs
+
+
+The architecture separates orchestration logic from runtime execution, allowing the system to scale and remain observable.
+
+---
+
+## Key Concepts
+
+**Workflow**
+
+A declarative specification describing a sequence or graph of agent actions.
+
+**Run**
+
+A single execution instance of a workflow.
+
+**Event**
+
+An immutable record describing a step in the execution timeline.
+
+**Replay**
+
+Re-execution of a historical run from its event log.
+
+**Fork**
+
+Creation of a new run derived from the event history of an existing run.
+
+---
+
+## Why LORK Exists
+
+As AI agents become more autonomous, engineering teams require infrastructure capable of managing complex decision-making systems.
+
+Traditional debugging tools are insufficient for systems driven by probabilistic models and external tool calls.
+
+LORK addresses this challenge by introducing deterministic execution, event-sourced state, and replayable agent workflows.
+
+---
+
+## Repository Structure
+
+
 lork/
-├── control_plane/
-├── policy/
-├── runtime/
-├── storage/
-├── state/
-├── observability/
-├── gateway/
-├── sdk/
-Roadmap
-Phase 1
+├ cmd/
+├ lork/
+├ workflows/
+├ docs/
+├ tests/
+└ infra/
 
-Agent identity
 
-Policy enforcement
+The project separates control-plane logic, runtime execution, and developer tooling into clearly defined modules.
 
-Task scheduling
+---
 
-Replayable runs
-
-Phase 2
-
-REST API
-
-Postgres storage
-
-Redis distributed queue
-
-multi-worker runtime
-
-Phase 3
-
-agent marketplace
-
-multi-agent coordination
-
-enterprise governance
-
-Why LORK Exists
-
-We believe AI agents will become the next generation of workers.
-
-But workers need infrastructure.
-
-containers → Kubernetes
-functions → serverless
-agents → LORK
-Status
+## Status
 
 LORK is currently early-stage infrastructure under active development.
 
-The goal is to build the control plane for autonomous AI systems.
+The goal is to establish the operational foundation required for reliable AI agent systems.
 
-Contributing
+---
 
-Contributions are welcome.
-
-See CONTRIBUTING.md for development guidelines.
-
-License
+## License
 
 Apache 2.0
-
